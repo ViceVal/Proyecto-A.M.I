@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import argparse
 import queue
 import threading
@@ -10,6 +7,9 @@ import math
 
 import numpy as np
 import matplotlib.pyplot as plt
+
+import sys
+sys.argv = ["live_spectrogram.py", "--show_f0", "--detect_chord"]
 
 try:
     import sounddevice as sd
