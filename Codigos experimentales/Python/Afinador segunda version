@@ -1,0 +1,330 @@
+import threading
+import math
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+import numpy as np
+
+try:
+    import sounddevice as sd
+except ImportError:
+    sd = None
+
+try:
+    import librosa
+except ImportError:
+    librosa = None
+
+NOTE_NAMES_SHARP = ['C', 'C#', 'D', 'D#', 'E', 'F',
+                    'F#', 'G', 'G#', 'A', 'A#', 'B']
+
+NOTE_NAMES_ES = {
+    "C":  "Do",
+    "C#": "Do#",
+    "D":  "Re",
+    "D#": "Re#",
+    "E":  "Mi",
+    "F":  "Fa",
+    "F#": "Fa#",
+    "G":  "Sol",
+    "G#": "Sol#",
+    "A":  "La",
+    "A#": "La#",
+    "B":  "Si"
+}
+
+GUITAR_OPEN_STRINGS = {
+    "E2": 82.41,
+    "A2": 110.00,
+    "D3": 146.83,
+    "G3": 196.00,
+    "B3": 246.94,
+    "E4": 329.63
+}
+
+def hz_to_midi(f):
+    return 69.0 + 12.0 * np.log2(f / 440.0)
+
+def midi_to_hz(m):
+    return 440.0 * (2.0 ** ((m - 69) / 12.0))
+
+def midi_to_note_name(m):
+    m_rounded = int(round(m))
+    pc = m_rounded % 12
+    octave = (m_rounded // 12) - 1
+    return NOTE_NAMES_SHARP[pc], octave
+
+def hz_to_note_and_error(f_hz):
+    if f_hz <= 0 or not np.isfinite(f_hz):
+        return None, None, None, None, None
+    m = hz_to_midi(f_hz)
+    m_near = round(m)
+    note_en, octave = midi_to_note_name(m_near)
+    note_es = NOTE_NAMES_ES.get(note_en, note_en)
+    freq_ideal = midi_to_hz(m_near)
+    cents_error = 1200.0 * np.log2(f_hz / freq_ideal)
+    return note_en, note_es, octave, freq_ideal, cents_error
+
+def map_to_guitar_string(f_hz, max_cents=50.0):
+    if f_hz is None or f_hz <= 0 or not np.isfinite(f_hz):
+        return None, None, None
+    best_name = None
+    best_cents = None
+    best_f_ideal = None
+    for name, f_ideal in GUITAR_OPEN_STRINGS.items():
+        cents = 1200.0 * np.log2(f_hz / f_ideal)
+        if (best_cents is None) or (abs(cents) < abs(best_cents)):
+            best_cents = cents
+            best_name = name
+            best_f_ideal = f_ideal
+    if best_name is not None and abs(best_cents) <= max_cents:
+        return best_name, best_f_ideal, best_cents
+    else:
+        return None, None, None
+
+def estimate_f0_yin(y, sr, fmin=60.0, fmax=1000.0,
+                    frame_length=4096, hop_length=512):
+    try:
+        f0_series = librosa.yin(
+            y,
+            fmin=fmin,
+            fmax=fmax,
+            sr=sr,
+            frame_length=frame_length,
+            hop_length=hop_length,
+            trough_threshold=0.1
+        )
+        finite = np.isfinite(f0_series)
+        if not np.any(finite):
+            return None
+        return float(f0_series[finite][-1])
+    except Exception:
+        return None
+
+class RingBuffer:
+    def __init__(self, size):
+        self.size = size
+        self.buf = np.zeros(size, dtype=np.float32)
+        self.pos = 0
+        self.lock = threading.Lock()
+
+    def write(self, data):
+        n = len(data)
+        with self.lock:
+            idx = (self.pos + np.arange(n)) % self.size
+            self.buf[idx] = data
+            self.pos = (self.pos + n) % self.size
+
+    def read(self, n):
+        with self.lock:
+            start = (self.pos - n) % self.size
+            idx = (start + np.arange(n)) % self.size
+            return self.buf[idx].copy()
+
+class TunerApp:
+    def __init__(self, master):
+        self.master = master
+        master.title("Afinador en tiempo real")
+
+        if sd is None or librosa is None:
+            messagebox.showerror(
+                "Error",
+                "Faltan librerías.\nInstala en Thonny:\n\npip install sounddevice librosa numpy soundfile"
+            )
+
+        self.sr = 22050
+        self.block = 1024
+        self.channels = 1
+        self.seconds_window = 1.5
+        self.fmin = 60.0
+        self.fmax = 1000.0
+
+        self.buffer = RingBuffer(int(self.sr * self.seconds_window))
+        self.stream = None
+        self.running = False
+
+        self.create_widgets()
+        self.master.after(50, self.update_tuner)
+
+    def create_widgets(self):
+        main = ttk.Frame(self.master)
+        main.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        self.label_note = ttk.Label(
+            main,
+            text="--",
+            font=("Arial", 48, "bold")
+        )
+        self.label_note.pack(pady=5)
+
+        self.label_note_es = ttk.Label(
+            main,
+            text="",
+            font=("Arial", 24)
+        )
+        self.label_note_es.pack(pady=5)
+
+        self.label_freq = ttk.Label(
+            main,
+            text="f0: -- Hz",
+            font=("Arial", 16)
+        )
+        self.label_freq.pack(pady=5)
+
+        self.label_cents = ttk.Label(
+            main,
+            text="Desviación: -- cents",
+            font=("Arial", 16)
+        )
+        self.label_cents.pack(pady=5)
+
+        self.canvas = tk.Canvas(main, width=300, height=80, bg="white")
+        self.canvas.pack(pady=10)
+
+        self.mid_x = 150
+        self.mid_y = 40
+        self.canvas.create_line(20, self.mid_y, 280, self.mid_y, width=2)
+        self.canvas.create_line(150-5, self.mid_y-10, 150-5, self.mid_y+10, fill="green")
+        self.canvas.create_line(150+5, self.mid_y-10, 150+5, self.mid_y+10, fill="green")
+        self.canvas.create_line(150-15, self.mid_y-10, 150-15, self.mid_y+10, fill="orange")
+        self.canvas.create_line(150+15, self.mid_y-10, 150+15, self.mid_y+10, fill="orange")
+        self.canvas.create_line(150-50, self.mid_y-15, 150-50, self.mid_y+15, fill="red")
+        self.canvas.create_line(150+50, self.mid_y-15, 150+50, self.mid_y+15, fill="red")
+
+        self.needle = self.canvas.create_line(
+            self.mid_x, self.mid_y-20,
+            self.mid_x, self.mid_y+20,
+            width=3,
+            fill="blue"
+        )
+
+        self.label_status = ttk.Label(
+            main,
+            text="Listo.",
+            font=("Arial", 12)
+        )
+        self.label_status.pack(pady=5)
+
+        btn_frame = ttk.Frame(main)
+        btn_frame.pack(pady=5)
+
+        self.btn_start = ttk.Button(btn_frame, text="Start", command=self.start)
+        self.btn_start.pack(side=tk.LEFT, padx=5)
+
+        self.btn_stop = ttk.Button(btn_frame, text="Stop", command=self.stop, state=tk.DISABLED)
+        self.btn_stop.pack(side=tk.LEFT, padx=5)
+
+    def audio_callback(self, indata, frames, time_info, status):
+        if status:
+            print("Audio status:", status)
+        x = indata.astype(np.float32)
+        if x.ndim > 1:
+            x = np.mean(x, axis=1)
+        self.buffer.write(x)
+
+    def start(self):
+        if self.running:
+            return
+        if sd is None or librosa is None:
+            messagebox.showerror("Error", "Faltan sounddevice/librosa.")
+            return
+
+        try:
+            self.stream = sd.InputStream(
+                samplerate=self.sr,
+                blocksize=self.block,
+                channels=self.channels,
+                callback=self.audio_callback
+            )
+            self.stream.start()
+            self.running = True
+            self.btn_start.config(state=tk.DISABLED)
+            self.btn_stop.config(state=tk.NORMAL)
+            self.label_status.config(text="Escuchando...")
+        except Exception as e:
+            messagebox.showerror("Error de audio", f"No se pudo iniciar el stream:\n{e}")
+            self.running = False
+
+    def stop(self):
+        if not self.running:
+            return
+        try:
+            if self.stream is not None:
+                self.stream.stop()
+                self.stream.close()
+        except Exception:
+            pass
+        self.stream = None
+        self.running = False
+        self.btn_start.config(state=tk.NORMAL)
+        self.btn_stop.config(state=tk.DISABLED)
+        self.label_status.config(text="Detenido.")
+
+    def update_tuner(self):
+        if self.running:
+            n = int(self.sr * self.seconds_window)
+            y = self.buffer.read(n)
+
+            f0 = estimate_f0_yin(
+                y, self.sr,
+                fmin=75.0,
+                fmax=400.0,
+                frame_length=4096,
+                hop_length=512
+            )
+
+            if f0 is not None:
+                string_name, f_ideal, cents = map_to_guitar_string(f0, max_cents=50.0)
+
+                if string_name is not None:
+                    note_en = string_name[0]
+                    octave = int(string_name[1])
+                    note_es = NOTE_NAMES_ES.get(note_en, note_en)
+
+                    self.label_note.config(text=string_name)
+                    self.label_note_es.config(text=f"{note_es} {octave}")
+                    self.label_freq.config(text=f"f0 ≈ {f0:.1f} Hz (ideal {f_ideal:.1f} Hz)")
+                    self.label_cents.config(text=f"Desviación: {cents:+.1f} cents")
+
+                    abs_c = abs(cents)
+                    if abs_c < 5:
+                        estado = "OK (afinada)"
+                    elif abs_c < 15:
+                        estado = "Casi (ajusta un poco)"
+                    else:
+                        estado = "Desafinada (ajusta más)"
+                    self.label_status.config(text=f"{estado} – {string_name} ({note_es})")
+
+                    max_c = 50.0
+                    c_clamped = max(-max_c, min(max_c, cents))
+                    dx = (c_clamped / max_c) * 50.0
+                    x = self.mid_x + dx
+                    self.canvas.coords(
+                        self.needle,
+                        x, self.mid_y-20,
+                        x, self.mid_y+20
+                    )
+                else:
+                    self.reset_display("No parece una cuerda de guitarra")
+            else:
+                self.reset_display("Sin señal clara / ruido")
+
+        self.master.after(80, self.update_tuner)
+
+    def reset_display(self, msg="Listo."):
+        self.label_note.config(text="--")
+        self.label_note_es.config(text="")
+        self.label_freq.config(text="f0: -- Hz")
+        self.label_cents.config(text="Desviación: -- cents")
+        self.label_status.config(text=msg)
+        self.canvas.coords(
+            self.needle,
+            self.mid_x, self.mid_y-20,
+            self.mid_x, self.mid_y+20
+        )
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TunerApp(root)
+    root.mainloop()
+
