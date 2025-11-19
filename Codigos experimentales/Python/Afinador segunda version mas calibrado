@@ -83,7 +83,7 @@ def map_to_guitar_string(f_hz, max_cents=50.0):
         return None, None, None
 
 def estimate_f0_yin(y, sr, fmin=60.0, fmax=1000.0,
-                    frame_length=4096, hop_length=512):
+                    frame_length=8192, hop_length=512):
     try:
         f0_series = librosa.yin(
             y,
@@ -269,7 +269,7 @@ class TunerApp:
                 y, self.sr,
                 fmin=75.0,
                 fmax=400.0,
-                frame_length=4096,
+                frame_length=8192,
                 hop_length=512
             )
 
@@ -281,8 +281,8 @@ class TunerApp:
                     octave = int(string_name[1])
                     note_es = NOTE_NAMES_ES.get(note_en, note_en)
 
-                    self.label_note.config(text=string_name)
-                    self.label_note_es.config(text=f"{note_es} {octave}")
+                    self.label_note.config(text=f"{note_en}{octave}")
+                    self.label_note_es.config(text=f"{note_es} (octava {octave})")
                     self.label_freq.config(text=f"f0 ≈ {f0:.1f} Hz (ideal {f_ideal:.1f} Hz)")
                     self.label_cents.config(text=f"Desviación: {cents:+.1f} cents")
 
@@ -293,7 +293,7 @@ class TunerApp:
                         estado = "Casi (ajusta un poco)"
                     else:
                         estado = "Desafinada (ajusta más)"
-                    self.label_status.config(text=f"{estado} – {string_name} ({note_es})")
+                    self.label_status.config(text=f"{estado}")
 
                     max_c = 50.0
                     c_clamped = max(-max_c, min(max_c, cents))
