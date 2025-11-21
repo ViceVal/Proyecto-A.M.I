@@ -3,7 +3,7 @@ import numpy as np
 import math
 import time
 import os
-
+#la version de web se abre con live server el tuner.html y la en codigo solo seria iniciarlo
 # Frecuencias estándar de guitarra E A D G B E
 notes = {
     "E2": 82.41,
@@ -130,5 +130,6 @@ with sd.InputStream(channels=1, samplerate=FS, blocksize=BLOCK):
 
         print("\nIndicador:")
         draw_meter(cents)
+
 
         time.sleep(0.5)
