@@ -2,6 +2,7 @@ import sounddevice as sd
 import numpy as np
 import json
 import scipy.io.wavfile as wav
+#si quieres verlo pon en el archivo grabacion.wav abrir con live server (nesecitas descargar la estension)
 
 DURACION = 5  # segundos a grabar
 FS = 44100   # frecuencia de muestreo
@@ -23,4 +24,5 @@ with open("audio_data.json", "w") as f:
     json.dump(samples, f)
 
 print("✔ Archivo JSON generado: audio_data.json")
+
 print("✔ Archivo WAV generado: grabacion.wav")
