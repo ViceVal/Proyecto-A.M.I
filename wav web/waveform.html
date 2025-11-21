@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Forma de Onda WAV</title>
+
+    <style>
+        body {
+            background: #111;
+            color: white;
+            font-family: Arial;
+            text-align: center;
+        }
+        canvas {
+            border: 1px solid white;
+            width: 90%;
+            height: 300px;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Forma de Onda del Audio</h1>
+
+<canvas id="waveCanvas"></canvas>
+
+<script>
+async function cargarOnda() {
+    const response = await fetch("audio_data.json");
+    const data = await response.json();
+    
+    const canvas = document.getElementById("waveCanvas");
+    const ctx = canvas.getContext("2d");
+
+    canvas.width = window.innerWidth * 0.9;
+    canvas.height = 300;
+
+    ctx.strokeStyle = "cyan";
+    ctx.lineWidth = 1;
+
+    const mid = canvas.height / 2;
+
+    ctx.beginPath();
+    ctx.moveTo(0, mid);
+
+    for (let i = 0; i < data.length; i += 50) { // saltar para reducir tamaño
+        const x = (i / data.length) * canvas.width;
+        const y = mid - (data[i] / 32768) * mid;
+        ctx.lineTo(x, y);
+    }
+
+    ctx.stroke();
+}
+
+cargarOnda();
+</script>
+
+</body>
+</html>

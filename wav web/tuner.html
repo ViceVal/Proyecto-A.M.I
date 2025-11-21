@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Afinador de Guitarra</title>
+<style>
+    body {
+        background:#111;
+        color:white;
+        font-family:Arial;
+        text-align:center;
+        padding-top:40px;
+    }
+
+    #gauge {
+        width: 300px;
+        height: 150px;
+        margin: auto;
+        position: relative;
+    }
+
+    /* Aguja */
+    #needle {
+        width: 4px;
+        height: 120px;
+        background: red;
+        position: absolute;
+        bottom: 0;
+        left: 50%;
+        transform-origin: bottom center;
+        transform: rotate(0deg);
+    }
+
+    /* Zona verde de afinación */
+    #sweetspot {
+        position:absolute;
+        width:40px;
+        height:10px;
+        background:#00ff00;
+        bottom:5px;
+        left:calc(50% - 20px);
+        border-radius:5px;
+    }
+
+    .labels {
+        width:300px;
+        margin:auto;
+        display:flex;
+        justify-content:space-between;
+        font-size:20px;
+    }
+</style>
+</head>
+<body>
+
+<h1>Afinador de Guitarra 🎸</h1>
+<h2 id="note">Nota: ---</h2>
+<h2 id="cents">Cents: ---</h2>
+
+<div class="labels">
+    <span>Grave</span>
+    <span>Agudo</span>
+</div>
+
+<div id="gauge">
+    <div id="needle"></div>
+    <div id="sweetspot"></div>
+</div>
+
+<button onclick="startTuner()">Iniciar Afinador</button>
+
+<script>
+const notas = [
+    { nota: "E2", freq: 82.41 },
+    { nota: "A2", freq: 110.00 },
+    { nota: "D3", freq: 146.83 },
+    { nota: "G3", freq: 196.00 },
+    { nota: "B3", freq: 246.94 },
+    { nota: "E4", freq: 329.63 }
+];
+
+let audioContext, mic, analyser, dataArray;
+
+function startTuner() {
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        mic = audioContext.createMediaStreamSource(stream);
+
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 2048;
+
+        dataArray = new Float32Array(analyser.fftSize);
+        mic.connect(analyser);
+
+        updatePitch();
+    });
+}
+
+function autoCorrelate(buffer, sampleRate) {
+    let SIZE = buffer.length;
+    let MAX_SAMPLES = Math.floor(SIZE / 2);
+    let bestOffset = -1;
+    let bestCorrelation = 0;
+    let rms = 0;
+
+    for (let i = 0; i < SIZE; i++) {
+        let value = buffer[i];
+        rms += value * value;
+    }
+    rms = Math.sqrt(rms / SIZE);
+    if (rms < 0.01) return -1;
+
+    let lastCorrelation = 1;
+    for (let offset = 0; offset < MAX_SAMPLES; offset++) {
+        let correlation = 0;
+
+        for (let i = 0; i < MAX_SAMPLES; i++) {
+            correlation += Math.abs((buffer[i]) - (buffer[i + offset]));
+        }
+
+        correlation = 1 - (correlation / MAX_SAMPLES);
+
+        if (correlation > 0.9 && correlation > lastCorrelation) {
+            bestCorrelation = correlation;
+            bestOffset = offset;
+        }
+        lastCorrelation = correlation;
+    }
+
+    if (bestOffset > -1)
+        return sampleRate / bestOffset;
+
+    return -1;
+}
+
+function updatePitch() {
+    analyser.getFloatTimeDomainData(dataArray);
+
+    let freq = autoCorrelate(dataArray, audioContext.sampleRate);
+    if (freq !== -1) detectNote(freq);
+
+    requestAnimationFrame(updatePitch);
+}
+
+function detectNote(freq) {
+    let closest = notas.reduce((prev, curr) =>
+        Math.abs(curr.freq - freq) < Math.abs(prev.freq - freq) ? curr : prev
+    );
+
+    document.getElementById("note").textContent = "Nota: " + closest.nota;
+
+    let cents = 1200 * Math.log2(freq / closest.freq);
+    cents = Math.max(-50, Math.min(50, cents)); // limitar
+
+    document.getElementById("cents").textContent = "Cents: " + cents.toFixed(1);
+
+    let angle = (cents / 50) * 45; // -50c = -45°, +50c = +45°
+    document.getElementById("needle").style.transform = `rotate(${angle}deg)`;
+}
+</script>
+
+</body>
+</html>
