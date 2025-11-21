@@ -1,8 +1,8 @@
 import wave
 import json
 import audioop
-
-wav_file = "25. L.D_Worton - An Ultra Violent Fate.wav"
+#si quieres verlo pon en el archivo waveform.html abrir con live server (nesecitas descargar la estension de vs code)
+wav_file = "audio.wav" #pon el nombre de tu audio hay
 json_file = "audio_data.json"
 
 with wave.open(wav_file, 'rb') as wav:
@@ -36,3 +36,4 @@ with open(json_file, "w") as f:
     json.dump(samples, f)
 
 print("✔ Archivo convertido correctamente a audio_data.json")
+
