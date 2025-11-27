@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Afinador de Guitarra — Mejorado</title>
+<style>
+  :root{
+    --bg:#0f1720;
+    --card:#0b1220;
+    --accent:#00d084;
+    --muted:#9aa9b2;
+    --danger:#ff6b6b;
+    --glass: rgba(255,255,255,0.03);
+  }
+  html,body {
+    height:100%;
+    margin:0;
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    background: linear-gradient(180deg,#071019 0%, #07141b 100%);
+    color:#e6eef6;
+    -webkit-font-smoothing:antialiased;
+    -moz-osx-font-smoothing:grayscale;
+  }
+
+  .container{
+    max-width:980px;
+    margin:28px auto;
+    padding:22px;
+  }
+
+  .card{
+    background:var(--card);
+    border-radius:12px;
+    box-shadow: 0 6px 30px rgba(2,6,23,0.6);
+    padding:18px;
+  }
+
+  header{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:16px;
+    margin-bottom:14px;
+  }
+
+  h1{ margin:0; font-size:20px; letter-spacing:0.2px; }
+  p.lead{ margin:0; color:var(--muted); font-size:13px }
+
+  .controls{
+    display:flex;
+    gap:10px;
+    align-items:center;
+  }
+
+  button{
+    background: linear-gradient(180deg,#0f3347,#083047);
+    color:#e6f7ff;
+    border:1px solid rgba(255,255,255,0.03);
+    padding:10px 14px;
+    border-radius:8px;
+    cursor:pointer;
+    font-weight:600;
+    font-size:14px;
+  }
+  button.secondary{
+    background:transparent;
+    border:1px solid rgba(255,255,255,0.06);
+  }
+
+  .main {
+    display:flex;
+    gap:20px;
+    margin-top:18px;
+    align-items:center;
+    justify-content:space-between;
+  }
+
+  /* Gauge area */
+  .gauge-wrap{
+    width:520px;
+    padding:18px;
+    border-radius:10px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.015));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+  }
+
+  #gauge {
+    width:100%;
+    height:220px;
+    display:block;
+  }
+
+  .info {
+    width:320px;
+    padding:14px;
+    border-radius:10px;
+    background:var(--glass);
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+  }
+
+  .big {
+    font-size:42px;
+    font-weight:700;
+    letter-spacing:0.6px;
+  }
+  .sub {
+    color:var(--muted);
+    font-size:14px;
+  }
+
+  .cents {
+    font-size:20px;
+    font-weight:700;
+    color:#e7eef3;
+  }
+
+  .target-freq { color:var(--muted); font-size:13px; }
+
+  .labels {
+    display:flex;
+    justify-content:space-between;
+    padding:6px 10px;
+    font-size:12px;
+    color:var(--muted);
+  }
+
+  .legend {
+    display:flex;
+    gap:8px;
+    align-items:center;
+    color:var(--muted);
+    font-size:12px;
+  }
+  .dot { width:10px;height:10px;border-radius:50%; }
+  .dot.green{ background:var(--accent) }
+  .dot.gray{ background:#7a8b95 }
+
+  footer.note {
+    margin-top:14px;
+    color:var(--muted);
+    font-size:13px;
+  }
+
+  /* responsive */
+  @media (max-width:900px){
+    .main { flex-direction:column; align-items:center; }
+    .gauge-wrap, .info { width:100% }
+    .info { order:2; }
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <header>
+        <div>
+          <h1>Afinador de Guitarra — Mejorado</h1>
+          <p class="lead">Micrófono en tiempo real · Zona perfecta ±5 cents · Nota en inglés y latín</p>
+        </div>
+
+        <div class="controls">
+          <button id="startBtn">Iniciar Afinador</button>
+          <button id="stopBtn" class="secondary" disabled>Detener (Ctrl+W o cerrar)</button>
+        </div>
+      </header>
+
+      <div class="main">
+        <div class="gauge-wrap cardish">
+          <canvas id="gauge" width="520" height="220"></canvas>
+          <div class="labels">
+            <span>Grave</span>
+            <span>Agudo</span>
+          </div>
+        </div>
+
+        <div class="info">
+          <div>
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <div>
+                <div id="noteName" class="big">—</div>
+                <div id="noteLatin" class="sub">—</div>
+              </div>
+              <div style="text-align:right">
+                <div class="cents" id="cents">—</div>
+                <div class="target-freq" id="targetFreq">— Hz</div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;">
+            <div class="legend"><div class="dot green"></div> Zona perfecta (±5 cents)</div>
+            <div class="legend"><div class="dot gray"></div> Rango visual ±50 cents</div>
+          </div>
+
+          <div>
+            <label for="sensitivity" class="sub">Sensibilidad (umbral silencio): <span id="sensVal">0.01</span></label>
+            <input id="sensitivity" type="range" min="0.001" max="0.05" step="0.001" value="0.01" style="width:100%">
+          </div>
+
+          <div>
+            <label for="tolerance" class="sub">Tolerancia (cents para "afinado"): <span id="tolVal">5</span> cents</label>
+            <input id="tolerance" type="range" min="1" max="20" step="1" value="5" style="width:100%">
+          </div>
+
+          <div style="margin-top:6px;">
+            <button id="refTone" class="secondary">Reproducir tono referencia (nota actual)</button>
+          </div>
+
+          <div style="margin-top:8px">
+            <small class="sub">Instrucciones: presiona "Iniciar Afinador", acepta el permiso de micrófono y toca una cuerda. Pulsa "Detener" para cortar el micrófono.</small>
+          </div>
+        </div>
+      </div>
+
+      <footer class="note">
+        Nota: Para detener completamente la pestaña puedes cerrar o usar Ctrl+W. El botón "Detener" desconecta el micrófono.
+      </footer>
+    </div>
+  </div>
+
+<script>
+/* ------------------------
+   Datos importados / usados
+   ------------------------ */
+const FRECUENCIAS_ESTANDAR = {
+  "E2": 82.41,
+  "A2": 110.00,
+  "D3": 146.83,
+  "G3": 196.00,
+  "B3": 246.94,
+  "E4": 329.63
+};
+
+const NOTES_ORDER = ["E2","A2","D3","G3","B3","E4"];
+
+const NOTAS_LATINAS = {
+  "C": "Do", "C#": "Do#", "D": "Re", "D#": "Re#", 
+  "E": "Mi", "F": "Fa", "F#": "Fa#", "G": "Sol", 
+  "G#": "Sol#", "A": "La", "A#": "La#", "B": "Si"
+};
+
+/* ------------------------
+   Elementos UI y variables
+   ------------------------ */
+const startBtn = document.getElementById('startBtn');
+const stopBtn  = document.getElementById('stopBtn');
+const noteName = document.getElementById('noteName');
+const noteLatin= document.getElementById('noteLatin');
+const centsEl  = document.getElementById('cents');
+const targetFreqEl = document.getElementById('targetFreq');
+const sensRange = document.getElementById('sensitivity');
+const sensVal   = document.getElementById('sensVal');
+const tolRange  = document.getElementById('tolerance');
+const tolVal    = document.getElementById('tolVal');
+const refToneBtn= document.getElementById('refTone');
+
+let audioCtx = null;
+let analyser = null;
+let mediaStream = null;
+let rafId = null;
+let buffer = null;
+let dataFloat = null;
+
+/* Gauge canvas */
+const canvas = document.getElementById('gauge');
+const ctx = canvas.getContext('2d');
+
+/* initial UI */
+sensRange.addEventListener('input', ()=> sensVal.textContent = sensRange.value);
+tolRange.addEventListener('input', ()=> tolVal.textContent = tolRange.value);
+
+/* ------------------------
+   Utilidades de audio
+   ------------------------ */
+
+function autoCorrelate(buf, sampleRate) {
+  // Auto-correlation pitch detection (robusta para audio monofónico)
+  const SIZE = buf.length;
+  let rms = 0;
+  for (let i = 0; i < SIZE; i++) {
+    let val = buf[i];
+    rms += val * val;
+  }
+  rms = Math.sqrt(rms / SIZE);
+  if (rms < parseFloat(sensRange.value)) return -1; // silencio / ruido bajo
+
+  let r = new Array(SIZE).fill(0);
+  for (let lag = 0; lag < SIZE; lag++) {
+    let sum = 0;
+    for (let i = 0; i < SIZE - lag; i++) {
+      sum += buf[i] * buf[i + lag];
+    }
+    r[lag] = sum;
+  }
+
+  // encontrar el primer pico relevante
+  let peakIndex = -1;
+  let peakValue = -Infinity;
+  for (let i = 1; i < SIZE; i++) {
+    if (r[i] > peakValue) {
+      peakValue = r[i];
+      peakIndex = i;
+    }
+  }
+
+  // ajustar con parabolización para mayor precisión
+  if (peakIndex <= 0) return -1;
+  // busca mejor pico en ventana alrededor
+  let bestOffset = peakIndex;
+  for (let i = Math.max(1, peakIndex-5); i <= Math.min(SIZE-1, peakIndex+5); i++){
+    if (r[i] > r[bestOffset]) bestOffset = i;
+  }
+  const frequency = sampleRate / bestOffset;
+  if (!isFinite(frequency) || frequency <= 0) return -1;
+  return frequency;
+}
+
+function findClosestNote(freq) {
+  let closest = null;
+  let minDiff = Infinity;
+  for (const n of NOTES_ORDER) {
+    const f = FRECUENCIAS_ESTANDAR[n];
+    const diff = Math.abs(f - freq);
+    if (diff < minDiff) { minDiff = diff; closest = n; }
+  }
+  return {note: closest, freq: FRECUENCIAS_ESTANDAR[closest]};
+}
+
+function centsError(freq, target){
+  return 1200 * Math.log2(freq / target);
+}
+
+/* ------------------------
+   Dibujado del gauge
+   ------------------------ */
+
+function drawGauge(cents, tolerance) {
+  const W = canvas.width;
+  const H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+
+  // background arc
+  const cx = W/2;
+  const cy = H*1.1; // center below canvas for semicircle
+  const r = Math.min(W*0.45, H*1.6);
+
+  // draw arc ticks
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(255,255,255,0.05)";
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, Math.PI*1.05, Math.PI*-0.05, false);
+  ctx.stroke();
+
+  // draw scale marks (-50..+50 cents)
+  const MAX = 50;
+  for (let c=-MAX; c<=MAX; c+=5){
+    const ang = map(c, -MAX, MAX, Math.PI*1.05, Math.PI*-0.05);
+    const x1 = cx + Math.cos(ang) * (r*0.92);
+    const y1 = cy + Math.sin(ang) * (r*0.92);
+    const x2 = cx + Math.cos(ang) * (r*0.98);
+    const y2 = cy + Math.sin(ang) * (r*0.98);
+    ctx.beginPath();
+    ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
+    ctx.stroke();
+  }
+
+  // draw sweet spot (tolerance)
+  // La zona será ±3 cents independientemente de la tolerancia
+  const perfect = 3;  // <-- ajusta este valor
+  const leftAng  = map(-perfect, -MAX, MAX, Math.PI*1.05, Math.PI*-0.05);
+  const rightAng = map( perfect, -MAX, MAX, Math.PI*1.05, Math.PI*-0.05);
+  ctx.beginPath();
+  ctx.fillStyle = "rgba(0,208,132,0.22)";
+  ctx.moveTo(cx, cy);
+  ctx.arc(cx, cy, r*0.86, rightAng, leftAng, true);
+  ctx.closePath();
+  ctx.fill();
+
+  // draw needle
+  const needleAng = map(cents, -MAX, MAX, Math.PI*1.05, Math.PI*-0.05);
+  const nx = cx + Math.cos(needleAng) * (r*0.78);
+  const ny = cy + Math.sin(needleAng) * (r*0.78);
+
+  // needle shadow
+  ctx.beginPath();
+  ctx.strokeStyle = "rgba(0,0,0,0.5)";
+  ctx.lineWidth = 6;
+  ctx.moveTo(cx,cy);
+  ctx.lineTo(nx,ny);
+  ctx.stroke();
+
+  // needle
+  ctx.beginPath();
+  ctx.strokeStyle = (Math.abs(cents) <= tolerance) ? "#00d084" : "#ff6b6b";
+  ctx.lineWidth = 3;
+  ctx.moveTo(cx,cy);
+  ctx.lineTo(nx,ny);
+  ctx.stroke();
+
+  // center cap
+  ctx.beginPath();
+  ctx.fillStyle = "#cbd6dc";
+  ctx.arc(cx, cy, 6, 0, Math.PI*2);
+  ctx.fill();
+
+  // labels: left & right
+  ctx.fillStyle = "rgba(230,238,246,0.9)";
+  ctx.font = "12px system-ui";
+  ctx.textAlign = "left";
+  ctx.fillText("Grave", 10, 18);
+  ctx.textAlign = "right";
+  ctx.fillText("Agudo", W-10, 18);
+}
+
+/* map helper */
+function map(v, a, b, c, d){
+  return (v - a) * (d - c) / (b - a) + c;
+}
+
+/* ------------------------
+   Loop principal
+   ------------------------ */
+
+function update(){
+  if (!analyser) return;
+
+  analyser.getFloatTimeDomainData(dataFloat);
+  const freq = autoCorrelate(dataFloat, audioCtx.sampleRate);
+
+  if (freq === -1) {
+    noteName.textContent = "—";
+    noteLatin.textContent = "Silencio";
+    centsEl.textContent = "—";
+    targetFreqEl.textContent = "— Hz";
+    drawGauge(0, parseFloat(tolRange.value));
+  } else {
+    const {note, freq: target} = findClosestNote(freq);
+    const cents = centsError(freq, target);
+    const capped = Math.max(-50, Math.min(50, cents));
+    const tol = parseFloat(tolRange.value);
+
+    noteName.textContent = note;
+
+    const base = note.replace(/[0-9]/g,'').replace('#','♯');
+    const notaLat = NOTAS_LATINAS[base.replace('♯','#')] || base;
+    noteLatin.textContent = `${notaLat} (${note})`;
+
+    centsEl.textContent = `${cents >= 0 ? "+" : ""}${cents.toFixed(1)} cents`;
+    targetFreqEl.textContent = `${target.toFixed(2)} Hz`;
+
+    drawGauge(capped, tol);
+  }
+
+  // Actualización más lenta: cada 50 ms (lo puedes cambiar)
+  setTimeout(update, 50);
+};
+
+
+/* ------------------------
+   Control de micrófono
+   ------------------------ */
+
+startBtn.addEventListener('click', async ()=>{
+  if (audioCtx) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaStream = stream;
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    dataFloat = new Float32Array(analyser.fftSize);
+    const source = audioCtx.createMediaStreamSource(stream);
+    source.connect(analyser);
+    rafId = requestAnimationFrame(update);
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+  } catch (e) {
+    alert("No se pudo acceder al micrófono. Revisa permisos o dispositivo.");
+    console.error(e);
+  }
+});
+
+stopBtn.addEventListener('click', ()=>{
+  if (mediaStream){
+    mediaStream.getTracks().forEach(t => t.stop());
+    mediaStream = null;
+  }
+  if (audioCtx){
+    audioCtx.close();
+    audioCtx = null;
+  }
+  if (rafId) cancelAnimationFrame(rafId);
+  analyser = null;
+  dataFloat = null;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  noteName.textContent = "—";
+  noteLatin.textContent = "—";
+  centsEl.textContent = "—";
+  targetFreqEl.textContent = "— Hz";
+  drawGauge(0, parseInt(tolRange.value));
+});
+
+/* play reference tone for current detected note (simple oscillator) */
+refToneBtn.addEventListener('click', ()=>{
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = "sine";
+  let currentNote = noteName.textContent;
+  const f = FRECUENCIAS_ESTANDAR[currentNote] || 440;
+  osc.frequency.value = f;
+  gain.gain.value = 0.05;
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  setTimeout(()=>{ osc.stop(); }, 900);
+});
+
+/* dibuja gauge inicial */
+drawGauge(0, parseInt(tolRange.value));
+
+</script>
+</body>
+</html>
