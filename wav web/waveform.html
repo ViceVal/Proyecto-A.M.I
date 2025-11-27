@@ -1,60 +1,455 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="UTF-8">
-    <title>Forma de Onda WAV</title>
-
+    <meta charset="utf-8" />
+    <title>Waveform con Zoom, Reproducción y Amplitud</title>
     <style>
         body {
-            background: #111;
-            color: white;
-            font-family: Arial;
+            background: #0f1720;
+            color: #e6eef6;
+            font-family: Arial, sans-serif;
             text-align: center;
+            padding: 18px;
         }
-        canvas {
-            border: 1px solid white;
-            width: 90%;
-            height: 300px;
-            margin-top: 20px;
+        .controls { margin-bottom: 8px; }
+        button {
+            margin: 6px;
+            padding: 8px 14px;
+            background:#1a2a3b;
+            border:1px solid #445;
+            color:white;
+            border-radius:8px;
+            cursor:pointer;
+        }
+        button:disabled { opacity:0.4; cursor:not-allowed; }
+
+        #waveCanvas {
+            border: 1px solid #334;
+            background:#0b1520;
+            border-radius:8px;
+            width: 95%;
+            max-width: 1300px;
+            height: 400px;
+            margin-top: 12px;
+            cursor: crosshair;
+            display:block;
+            margin-left:auto;
+            margin-right:auto;
+        }
+
+        .infoBar {
+            max-width: 1300px;
+            width: 95%;
+            margin: 10px auto 0;
+            display:flex;
+            justify-content:space-between;
+            gap:12px;
+            align-items:center;
+            font-size:14px;
+            color:#bcd0d9;
+        }
+
+        .infoBox {
+            background: rgba(255,255,255,0.02);
+            padding:8px 12px;
+            border-radius:8px;
+            min-width:180px;
+            text-align:left;
+        }
+        .label { color:#98aeb8; font-size:12px; }
+        .value { font-weight:700; font-size:16px; color:#e6f7ee; }
+
+        @media (max-width:800px){
+            .infoBar { flex-direction:column; align-items:flex-start; }
+            .infoBox { width:100% }
         }
     </style>
 </head>
 <body>
 
-<h1>Forma de Onda del Audio</h1>
+    <h1>Waveform — Zoom · Scroll · Play · Amplitud</h1>
+    <p style="color:#9fb3bf; margin-top:4px;">Rueda = Zoom · Arrastre = Mover · Clic = Saltar</p>
 
-<canvas id="waveCanvas"></canvas>
+    <div class="controls">
+        <button id="playBtn">Play</button>
+        <button id="pauseBtn" disabled>Pausar</button>
+        <button id="zoomAllBtn">Zoom a todo</button>
+    </div>
+
+    <canvas id="waveCanvas"></canvas>
+
+    <div class="infoBar">
+        <div class="infoBox">
+            <div class="label">Posición (cursor)</div>
+            <div class="value" id="cursorTime">— s</div>
+        </div>
+
+        <div class="infoBox">
+            <div class="label">Amplitud (instantánea)</div>
+            <div class="value" id="cursorAmp">—</div>
+        </div>
+
+        <div class="infoBox">
+            <div class="label">Playhead</div>
+            <div class="value" id="playTime">— s</div>
+        </div>
+
+        <div class="infoBox">
+            <div class="label">Duración total</div>
+            <div class="value" id="totalTime">— s</div>
+        </div>
+    </div>
 
 <script>
-async function cargarOnda() {
-    const response = await fetch("audio_data.json");
-    const data = await response.json();
-    
-    const canvas = document.getElementById("waveCanvas");
-    const ctx = canvas.getContext("2d");
+/* ==================================
+   Config / variables
+   ================================== */
+let samples = [];
+let sampleRate = 44100;    // ajusta si tu WAV tiene otra SR
+let TOTAL_SECONDS = 0;
 
-    canvas.width = window.innerWidth * 0.9;
-    canvas.height = 300;
+let viewStart = 0;         // segundos
+let viewDuration = 15;     // segundos visibles por defecto
+const minDuration = 0.05;
 
-    ctx.strokeStyle = "cyan";
-    ctx.lineWidth = 1;
+let audioCtx = null;
+let audioBuffer = null;
+let sourceNode = null;
+let isPlaying = false;
+let playStartAt = 0;       // audioCtx.currentTime al iniciar
+let playOffset = 0;        // segundos de offset cuando se inicia
+let animationRAF = null;
 
-    const mid = canvas.height / 2;
+/* UI */
+const canvas = document.getElementById('waveCanvas');
+const ctx = canvas.getContext('2d');
 
-    ctx.beginPath();
-    ctx.moveTo(0, mid);
+const playBtn = document.getElementById('playBtn');
+const pauseBtn = document.getElementById('pauseBtn');
+const zoomAllBtn = document.getElementById('zoomAllBtn');
 
-    for (let i = 0; i < data.length; i += 50) { // saltar para reducir tamaño
-        const x = (i / data.length) * canvas.width;
-        const y = mid - (data[i] / 32768) * mid;
-        ctx.lineTo(x, y);
+const cursorTimeEl = document.getElementById('cursorTime');
+const cursorAmpEl  = document.getElementById('cursorAmp');
+const playTimeEl    = document.getElementById('playTime');
+const totalTimeEl   = document.getElementById('totalTime');
+
+/* Helpers */
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function map(v,a,b,c,d){ return (v-a)*(d-c)/(b-a)+c; }
+
+/* =========================
+   Carga datos (JSON + WAV)
+   ========================= */
+async function cargarDatos(){
+    // Cargar samples (audio_data.json)
+    try {
+        const r1 = await fetch('audio_data.json');
+        samples = await r1.json();
+    } catch(e){
+        alert("No se encontró audio_data.json. Asegúrate de generarlo o colocar el archivo.");
+        throw e;
     }
 
+    TOTAL_SECONDS = samples.length / sampleRate;
+    totalTimeEl.textContent = TOTAL_SECONDS.toFixed(2) + " s";
+
+    // Cargar archivo WAV (grabacion.wav) para reproducción
+    try {
+        const r2 = await fetch('audio.wav');//cambiar nombre con el del audio
+        const arr = await r2.arrayBuffer();
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        audioBuffer = await audioCtx.decodeAudioData(arr);
+    } catch(e){
+        // Si no existe grabacion.wav, solo mostramos la forma de onda (pero reproducción no funcionará)
+        console.warn("audio.wav no encontrado o no decodificable. Reproducción deshabilitada.", e);
+        audioBuffer = null;
+    }
+
+    // ajusta vista para mostrar todo si audio menor que viewDuration
+    if (TOTAL_SECONDS < viewDuration) {
+        viewStart = 0;
+        viewDuration = Math.max(TOTAL_SECONDS, 0.1);
+    }
+
+    draw();
+    animationRAF = requestAnimationFrame(drawPlayhead);
+}
+
+/* =========================
+   Dibujado de waveform
+   ========================= */
+function draw(){
+    canvas.width  = canvas.clientWidth;
+    canvas.height = canvas.clientHeight || 400;
+    const W = canvas.width, H = canvas.height;
+    const mid = H / 2;
+
+    // fondo
+    ctx.fillStyle = "#0b1520";
+    ctx.fillRect(0,0,W,H);
+
+    // línea central
+    ctx.strokeStyle = "#223";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, mid);
+    ctx.lineTo(W, mid);
+    ctx.stroke();
+
+    // marcas de tiempo
+    ctx.fillStyle = "#99aabb";
+    ctx.font = "12px Arial";
+    const step = timeStepForSpan(viewDuration);
+    const startTick = Math.floor(viewStart / step) * step;
+    for (let t = startTick; t <= viewStart + viewDuration; t += step){
+        const x = ((t - viewStart) / viewDuration) * W;
+        ctx.strokeStyle = "#223";
+        ctx.beginPath();
+        ctx.moveTo(x, H - 10);
+        ctx.lineTo(x, H);
+        ctx.stroke();
+        ctx.fillText(t.toFixed(2) + "s", x + 4, H - 14);
+    }
+
+    // Waveform
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "#00d084";
+    ctx.beginPath();
+
+    const AMP_BOOST = 4.0;
+    const maxIndex = samples.length - 1;
+
+    // Para cada pixel calculamos sample correspondiente (decimales ok)
+    for (let px=0; px < W; px++){
+        const t = viewStart + (px / W) * viewDuration;
+        const idx = Math.floor(t * sampleRate);
+        if (idx < 0 || idx > maxIndex) continue;
+        const amp = (samples[idx] / 32768) * AMP_BOOST;
+        const y = mid - amp * (mid * 0.95);
+        if (px === 0) ctx.moveTo(px, y);
+        else ctx.lineTo(px, y);
+    }
     ctx.stroke();
 }
 
-cargarOnda();
-</script>
+/* decide paso de marcas según span */
+function timeStepForSpan(span){
+    if (span <= 0.5) return 0.05;
+    if (span <= 1) return 0.1;
+    if (span <= 5) return 0.2;
+    if (span <= 10) return 0.5;
+    if (span <= 30) return 1;
+    if (span <= 60) return 2;
+    return 5;
+}
 
+/* =========================
+   Zoom (wheel) - centrado en cursor
+   ========================= */
+canvas.addEventListener('wheel', (e)=>{
+    e.preventDefault();
+    const oldDuration = viewDuration;
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+
+    if (e.deltaY < 0) viewDuration *= 0.9;
+    else viewDuration *= 1.1;
+
+    viewDuration = clamp(viewDuration, minDuration, TOTAL_SECONDS || 3600);
+
+    // mantener el punto bajo el cursor
+    const mouseTime = viewStart + (mouseX / canvas.width) * oldDuration;
+    viewStart = mouseTime - (mouseX / canvas.width) * viewDuration;
+
+    if (viewStart < 0) viewStart = 0;
+    if (viewStart + viewDuration > TOTAL_SECONDS) viewStart = Math.max(0, TOTAL_SECONDS - viewDuration);
+
+    draw();
+});
+
+/* =========================
+   Drag para mover (click izquierdo)
+   ========================= */
+let isDragging = false;
+canvas.addEventListener('mousedown', (e)=>{
+    if (e.button !== 0) return;
+    isDragging = true;
+    canvas.style.cursor = 'grabbing';
+});
+window.addEventListener('mouseup', (e)=>{
+    isDragging = false;
+    canvas.style.cursor = 'crosshair';
+});
+canvas.addEventListener('mousemove', (e)=>{
+    if (isDragging && e.buttons === 1){
+        // movimiento pan
+        const dx = e.movementX;
+        viewStart -= (dx / canvas.width) * viewDuration;
+        viewStart = clamp(viewStart, 0, Math.max(0, TOTAL_SECONDS - viewDuration));
+        draw();
+    }
+    // Siempre actualizar lectura de amplitud bajo cursor
+    updateCursorReadout(e);
+});
+
+/* =========================
+   Click para saltar la reproducción
+   ========================= */
+canvas.addEventListener('click', (e)=>{
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const t = viewStart + (x / canvas.width) * viewDuration;
+    seekAudioTo(t);
+    updateCursorReadout(e);
+});
+
+/* =========================
+   Mostrar amplitud bajo cursor
+   ========================= */
+function updateCursorReadout(e){
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    if (x < 0 || x > canvas.width || e.clientY < rect.top || e.clientY > rect.bottom){
+        cursorTimeEl.textContent = "— s";
+        cursorAmpEl.textContent  = "—";
+        return;
+    }
+    const t = viewStart + (x / canvas.width) * viewDuration;
+    const idx = Math.round(t * sampleRate);
+    if (idx < 0 || idx >= samples.length) {
+        cursorTimeEl.textContent = t.toFixed(3) + " s";
+        cursorAmpEl.textContent  = "—";
+        return;
+    }
+    const raw = samples[idx];
+    let amp = raw / 32768;
+    if (!isFinite(amp)) amp = 0;
+    amp = clamp(amp, -1, 1);
+    cursorTimeEl.textContent = t.toFixed(3) + " s";
+    cursorAmpEl.textContent  = amp.toFixed(4);
+}
+
+/* =========================
+   Reproducción / Playhead
+   ========================= */
+function playAudio(){
+    if (!audioBuffer){
+        alert("No hay grabacion.wav cargado para reproducir.");
+        return;
+    }
+    if (isPlaying) return;
+    sourceNode = audioCtx.createBufferSource();
+    sourceNode.buffer = audioBuffer;
+    sourceNode.connect(audioCtx.destination);
+    // calcular offset (playOffset) en segundos: quiere decir desde donde reproducir
+    sourceNode.start(0, playOffset);
+    playStartAt = audioCtx.currentTime - playOffset;
+    isPlaying = true;
+    playBtn.disabled = true;
+    pauseBtn.disabled = false;
+}
+
+function pauseAudio(){
+    if (!isPlaying) return;
+    sourceNode.stop();
+    // actualizar playOffset
+    playOffset = audioCtx.currentTime - playStartAt;
+    isPlaying = false;
+    playBtn.disabled = false;
+    pauseBtn.disabled = true;
+}
+
+/* sincroniza playhead y dibuja cursor */
+function drawPlayhead(){
+    // actualizar UI de play time
+    if (isPlaying && audioCtx){
+        const current = audioCtx.currentTime - playStartAt;
+        playTimeEl.textContent = current.toFixed(3) + " s";
+        // si playhead sale del view, hacemos scroll automático para mantenerlo visible
+        if (current < viewStart || current > viewStart + viewDuration){
+            // centra playhead en viewport
+            viewStart = clamp(current - viewDuration / 2, 0, Math.max(0, TOTAL_SECONDS - viewDuration));
+            draw();
+        } else {
+            // solo redibujar el playhead encima
+            draw();
+        }
+
+        // dibujar playhead
+        const W = canvas.width;
+        const x = ((current - viewStart) / viewDuration) * W;
+        if (x >= 0 && x <= W){
+            ctx.strokeStyle = "rgba(255,80,80,0.95)";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, canvas.height);
+            ctx.stroke();
+        }
+
+        // si se llegó al final
+        if (current >= TOTAL_SECONDS){
+            // detener
+            pauseAudio();
+            playOffset = 0;
+        }
+    } else {
+        // mostrar playOffset como tiempo cuando está en pausa
+        playTimeEl.textContent = playOffset.toFixed(3) + " s";
+    }
+
+    animationRAF = requestAnimationFrame(drawPlayhead);
+}
+
+/* =========================
+   Seek helper
+   ========================= */
+function seekAudioTo(t){
+    t = clamp(t, 0, TOTAL_SECONDS);
+    playOffset = t;
+    if (isPlaying){
+        sourceNode.stop();
+        playAudio();
+    } else {
+        draw(); // actualizar vista
+        // también dibujar línea de playhead en nueva posición
+        const W = canvas.width;
+        const x = ((playOffset - viewStart) / viewDuration) * W;
+        if (x >= 0 && x <= W){
+            ctx.strokeStyle = "rgba(255,80,80,0.95)";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, canvas.height);
+            ctx.stroke();
+        }
+    }
+}
+
+/* =========================
+   Zoom a todo
+   ========================= */
+zoomAllBtn.addEventListener('click', ()=>{
+    viewStart = 0;
+    viewDuration = Math.max(TOTAL_SECONDS, 0.1);
+    draw();
+});
+
+/* =========================
+   Botones
+   ========================= */
+playBtn.addEventListener('click', ()=>{
+    // desbloqueo de contexto (Chrome requiere interacción)
+    if (!audioCtx){ audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    playAudio();
+});
+pauseBtn.addEventListener('click', pauseAudio);
+
+/* =========================
+   Inicia todo
+   ========================= */
+cargarDatos();
+
+</script>
 </body>
 </html>
