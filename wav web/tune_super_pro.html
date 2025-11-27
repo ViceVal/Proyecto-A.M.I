@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Tuner Super Pro — Detección Avanzada (Autocor + FFT)</title>
+<title>Tuner Super Pro — YIN + Autocorr (Mejorado)</title>
 <style>
 :root{
   --bg:#071018; --card:#0b1620; --accent:#00d084; --warn:#ff6b6b; --muted:#98aeb8;
@@ -34,6 +34,7 @@ button:disabled{opacity:.35;cursor:not-allowed}
 .small{font-size:12px;color:var(--muted)}
 .badge{display:inline-block;padding:6px 8px;border-radius:8px;background:rgba(255,255,255,0.02);font-weight:700}
 .conf{margin-top:10px;font-weight:700}
+input[type=range]{width:100%}
 @media (max-width:880px){.main{flex-direction:column}.info{width:100%}}
 </style>
 </head>
@@ -42,8 +43,8 @@ button:disabled{opacity:.35;cursor:not-allowed}
   <div class="card">
     <div class="header">
       <div>
-        <h1>Tuner Super Pro</h1>
-        <p class="lead">Autocorrelación + FFT · Estabilidad · Detecta cuerda · Zona perfecta</p>
+        <h1>Tuner Super Pro — YIN + Autocorr</h1>
+        <p class="lead">Detección robusta de pitch para guitarra — mejor precisión con micrófono</p>
       </div>
 
       <div class="controls">
@@ -101,25 +102,23 @@ button:disabled{opacity:.35;cursor:not-allowed}
         </div>
 
         <div class="conf" id="status">Estado: —</div>
-        <div class="footer">Presiona Iniciar y permite el acceso al micrófono. Usa una cuerda aislada para mejores resultados.</div>
+        <div class="footer">Consejo: usa una cuerda aislada y acércala al micrófono para mejor precisión.</div>
       </div>
     </div>
   </div>
 </div>
 
 <script>
-/* ---------------------
-   Config - notas / cuerdas
-   --------------------- */
-const NOTES = {"C":261.63,"C#":277.18,"D":293.66,"D#":311.13,"E":329.63,"F":349.23,"F#":369.99,"G":392.00,"G#":415.30,"A":440.00,"A#":466.16,"B":493.88};
-// We'll use target guitar strings by frequency (standard EADGBE tuned to E2..E4 as earlier)
+/* ======================
+   Config notas y cuerdas
+   ====================== */
+const NOTAS_LATINAS = {"C":"Do","C#":"Do#","D":"Re","D#":"Re#","E":"Mi","F":"Fa","F#":"Fa#","G":"Sol","G#":"Sol#","A":"La","A#":"La#","B":"Si"};
 const STRINGS = { "E2":82.41,"A2":110.00,"D3":146.83,"G3":196.00,"B3":246.94,"E4":329.63 };
 const STRINGS_ORDER = ["E2","A2","D3","G3","B3","E4"];
-const NOTAS_LATINAS = {"C":"Do","C#":"Do#","D":"Re","D#":"Re#","E":"Mi","F":"Fa","F#":"Fa#","G":"Sol","G#":"Sol#","A":"La","A#":"La#","B":"Si"};
 
-/* ---------------------
+/* ======================
    UI elements
-   --------------------- */
+   ====================== */
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const canvas = document.getElementById('gcanvas');
@@ -138,102 +137,48 @@ const tolRange = document.getElementById('tolerance');
 const tolVal = document.getElementById('tolVal');
 tolRange.addEventListener('input', ()=> tolVal.textContent = tolRange.value);
 
-/* ---------------------
+/* ======================
    Audio / analyser
-   --------------------- */
+   ====================== */
 let audioCtx = null;
-let analyser = null;
 let mediaStream = null;
-let fftSize = 16384; // high resolution FFT
-let timeDomain = null;
-let freqDomain = null;
+let analyser = null;
+let timeBuf = null;
+let freqBuf = null;
+let FFT_SIZE = 4096; // ventana recomendada (4096)
+let HISTORY_MAX = 6;
 
-/* ---------------------
-   State & stability
-   --------------------- */
-let historyFreq = []; // circular small buffer
-const HISTORY_MAX = 6; // number of frames to smooth
-let lastDetected = { freq:0, note:'—', cents:0, string:'—', conf:0 };
+/* ======================
+   Estado y suavizado
+   ====================== */
+let history = []; // buffer de frecuencias recientes
+let lastStableFreq = 0;
+let stabilityCount = 0;
+let smoothingAlpha = 0.75; // exponencial smoothing (0..1)
+let lastSmoothed = 0;
 
-/* ---------------------
+/* ======================
    Helpers
-   --------------------- */
+   ====================== */
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 function map(v,a,b,c,d){ return (v-a)*(d-c)/(b-a)+c; }
-function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
-function toCents(freq, target){ return 1200 * Math.log2(freq/target); }
+function toCents(freq,target){ return 1200*Math.log2(freq/target); }
 
-/* quadratic interpolation for peak refinement
-   given arrays of magnitude in dB (or linear), and index of peak
-*/
-function parabolicPeakInterp(magArr, index){
-  const alpha = magArr[index-1] || -Infinity;
-  const beta  = magArr[index];
-  const gamma = magArr[index+1] || -Infinity;
-  // convert from dB if necessary; we use linear magnitudes, but interpolation formula same
-  const p = 0.5 * (alpha - gamma) / (alpha - 2*beta + gamma);
-  return index + p;
+function freqToNote(freq){
+  if (!isFinite(freq) || freq<=0) return {name:'—', exactFreq:0};
+  const A4 = 440;
+  const semitone = 12 * Math.log2(freq / A4);
+  const midi = Math.round(semitone) + 69;
+  const noteIndex = (midi + 120) % 12;
+  const names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+  const octave = Math.floor(midi / 12) - 1;
+  const name = names[noteIndex] + octave;
+  const exactFreq = A4 * Math.pow(2, (midi - 69)/12);
+  return {name, exactFreq};
 }
 
-/* find peak in frequency domain with quadratic interpolation */
-function peakFromFFT(freqData, sampleRate, fftSize){
-  // freqData is Float32Array from analyser.getFloatFrequencyData (dB) or getByteFrequencyData
-  // But we'll use getFloatFrequencyData for dB. Convert to linear magnitude.
-  let bestIdx = 0;
-  let bestVal = -Infinity;
-  // search within human-guitar band (50Hz..1400Hz) to avoid low hum and high noise
-  const binFreq = sampleRate / fftSize;
-  const startBin = Math.max(2, Math.floor(50 / binFreq));
-  const endBin   = Math.min(freqData.length-2, Math.ceil(1400 / binFreq));
-  for(let i=startBin;i<=endBin;i++){
-    const val = freqData[i]; // in dB (negative numbers, larger = closer to 0)
-    if (val > bestVal){ bestVal = val; bestIdx = i; }
-  }
-  // Build a small linear array around bestIdx (convert dB to linear)
-  const linear = [];
-  for(let k = bestIdx-2; k <= bestIdx+2; k++){
-    const v = freqData[k];
-    linear.push(Math.pow(10, v/20)); // dB -> linear
-  }
-  const interpIndex = parabolicPeakInterp(linear, 2); // center at index 2 of this small array
-  // map back to global index:
-  const globalIndex = bestIdx + (interpIndex - 2);
-  const freq = globalIndex * binFreq;
-  // approximate magnitude:
-  const magnitudeLinear = Math.pow(10, bestVal/20);
-  return {freq, magnitude: magnitudeLinear, bin:globalIndex};
-}
-
-/* autocorrelation pitch detection (fast) -> returns freq or -1 */
-function autoCorrelate(buf, sampleRate){
-  const SIZE = buf.length;
-  let rms = 0;
-  for(let i=0;i<SIZE;i++){ const v = buf[i]; rms += v*v; }
-  rms = Math.sqrt(rms/SIZE);
-  if (rms < parseFloat(sensRange.value)) return -1;
-
-  let r = new Float32Array(SIZE);
-  for(let lag=0; lag<SIZE; lag++){
-    let sum = 0;
-    for(let i=0;i<SIZE-lag;i++) sum += buf[i]*buf[i+lag];
-    r[lag] = sum;
-  }
-  let peak = 1;
-  for(let i=2;i<SIZE;i++){
-    if (r[i] > r[peak]) peak = i;
-  }
-  if (peak === 0) return -1;
-  // refine with parabolic interpolation around peak
-  const left = r[peak-1], center = r[peak], right = r[peak+1] || 0;
-  const shift = 0.5 * (left - right) / (left - 2*center + right);
-  const trueLag = peak + shift;
-  const freq = sampleRate / trueLag;
-  if (!isFinite(freq) || freq <= 0) return -1;
-  return freq;
-}
-
-/* find closest string from STRINGS */
 function closestString(freq){
-  let best = null, minDiff=Infinity;
+  let best=null, minDiff=Infinity;
   for(const s of STRINGS_ORDER){
     const f = STRINGS[s];
     const d = Math.abs(Math.log2(freq/f));
@@ -242,61 +187,159 @@ function closestString(freq){
   return best;
 }
 
-/* find closest note (A4=440 base table dynamic across octaves) */
-function freqToNote(freq){
-  // We'll map frequency to nearest note name (A4=440 reference)
-  const A4 = 440;
-  const semitone = 12 * Math.log2(freq / A4);
-  const midi = Math.round(semitone) + 69;
-  const noteIndex = (midi + 120) % 12;
-  const names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-  const octave = Math.floor(midi / 12) - 1;
-  const name = names[noteIndex] + octave;
-  // compute exact freq of that midi:
-  const exactFreq = A4 * Math.pow(2, (midi - 69)/12);
-  return {name, exactFreq};
-}
+/* ======================
+   YIN pitch detection (optimized)
+   ====================== */
+function detectPitchYIN(buf, sampleRate) {
+  // buf: Float32Array time domain, length >= maxTau*2 ideally
+  // We'll search fundamental between 60Hz and 1200Hz (guitar safe)
+  const maxFreq = 1200;
+  const minFreq = 60;
+  const maxTau = Math.floor(sampleRate / minFreq); // lag max
+  const minTau = Math.floor(sampleRate / maxFreq); // lag min
 
-/* combine methods: prefer autocorr for low freq stability, use FFT for magnitude/confirm */
-function combinedPitchDetection(timeBuf, sampleRate, freqData){
-  // autocorr
-  const ac = autoCorrelate(timeBuf, sampleRate);
-  // fft peak
-  const fftPeak = peakFromFFT(freqData, sampleRate, analyser.fftSize);
-  // if autocorr valid and within band, prefer it; else use fft
-  if (ac > 50 && ac < 1200){
-    // if FFT frequency close to autocorr within 6% -> average for stability
-    if (fftPeak.freq > 0 && Math.abs(fftPeak.freq - ac)/ac < 0.06){
-      return {freq: (ac + fftPeak.freq)/2, mag: fftPeak.magnitude, method:'both'};
-    } else {
-      return {freq: ac, mag: fftPeak.magnitude, method:'autocorr'};
+  const yinBuffer = new Float32Array(maxTau+1);
+  let runningSum = 0;
+
+  // difference function
+  for (let tau = 1; tau <= maxTau; tau++) {
+    let sum = 0;
+    // limit i to avoid overflow
+    const limit = buf.length - tau;
+    for (let i = 0; i < limit; i++) {
+      const d = buf[i] - buf[i + tau];
+      sum += d * d;
     }
-  } else {
-    return {freq: fftPeak.freq, mag: fftPeak.magnitude, method:'fft'};
+    yinBuffer[tau] = sum;
   }
+
+  // cumulative mean normalized difference
+  let cum = 0;
+  yinBuffer[0] = 1;
+  for (let tau = 1; tau <= maxTau; tau++) {
+    cum += yinBuffer[tau];
+    yinBuffer[tau] = yinBuffer[tau] * tau / cum;
+  }
+
+  // search for first minimum under threshold
+  const threshold = 0.12; // empirical, adjustable
+  let tauEstimate = -1;
+  for (let tau = minTau; tau <= maxTau; tau++) {
+    if (yinBuffer[tau] < threshold) {
+      // find local minimum
+      while (tau + 1 <= maxTau && yinBuffer[tau + 1] < yinBuffer[tau]) tau++;
+      tauEstimate = tau;
+      break;
+    }
+  }
+  if (tauEstimate === -1) return null;
+
+  // parabolic interpolation around tauEstimate
+  const x0 = yinBuffer[tauEstimate - 1] || yinBuffer[tauEstimate];
+  const x1 = yinBuffer[tauEstimate];
+  const x2 = yinBuffer[tauEstimate + 1] || yinBuffer[tauEstimate];
+  const betterTau = tauEstimate + (x2 - x0) / (2 * (2 * x1 - x2 - x0));
+  const freq = sampleRate / betterTau;
+  if (!isFinite(freq) || freq <= 0) return null;
+  return freq;
 }
 
-/* ---------------------
+/* ======================
+   Autocorrelation fallback (fast)
+   ====================== */
+function autoCorrelate(buf, sampleRate) {
+  const SIZE = buf.length;
+  let rms = 0;
+  for (let i = 0; i < SIZE; i++) { const v = buf[i]; rms += v*v; }
+  rms = Math.sqrt(rms / SIZE);
+  if (rms < parseFloat(sensRange.value)) return null;
+
+  let r = new Float32Array(SIZE);
+  for (let lag = 0; lag < SIZE; lag++) {
+    let sum = 0;
+    for (let i = 0; i < SIZE - lag; i++) sum += buf[i] * buf[i + lag];
+    r[lag] = sum;
+  }
+  let peak = 1;
+  for (let i = 2; i < SIZE; i++) if (r[i] > r[peak]) peak = i;
+  // refine
+  const left = r[peak - 1] || 0, center = r[peak], right = r[peak + 1] || 0;
+  const shift = 0.5 * (left - right) / (left - 2*center + right);
+  const trueLag = peak + shift;
+  if (trueLag <= 0) return null;
+  const freq = sampleRate / trueLag;
+  if (!isFinite(freq) || freq <= 0) return null;
+  return freq;
+}
+
+/* ======================
+   FFT peak helper (parabolic interp)
+   ====================== */
+function peakFromFFT(freqData, sampleRate, fftSize) {
+  // freqData in dB (Float32Array)
+  let bestVal = -Infinity, bestIdx = -1;
+  const binFreq = sampleRate / fftSize;
+  const startBin = Math.max(2, Math.floor(50 / binFreq));
+  const endBin = Math.min(freqData.length - 2, Math.ceil(1400 / binFreq));
+  for (let i = startBin; i <= endBin; i++) {
+    const v = freqData[i];
+    if (v > bestVal) { bestVal = v; bestIdx = i; }
+  }
+  if (bestIdx < 1) return {freq:0, mag:0};
+  // get neighbors in linear
+  const vL = Math.pow(10, freqData[bestIdx-1]/20);
+  const vC = Math.pow(10, freqData[bestIdx]/20);
+  const vR = Math.pow(10, freqData[bestIdx+1]/20);
+  const p = 0.5 * (vL - vR) / (vL - 2*vC + vR); // sub-bin shift
+  const globalIndex = bestIdx + p;
+  const freq = globalIndex * binFreq;
+  const mag = Math.pow(10, bestVal/20);
+  return {freq, mag};
+}
+
+/* ======================
+   Combined detection: prefer YIN, fallback autocorr, confirm via FFT
+   ====================== */
+function detectPitchCombined(timeBuf, freqBuf, sampleRate) {
+  // Attempt YIN
+  const yinFreq = detectPitchYIN(timeBuf, sampleRate);
+  if (yinFreq) return {freq: yinFreq, method: 'YIN'};
+
+  // fallback autocorr
+  const ac = autoCorrelate(timeBuf, sampleRate);
+  if (ac) {
+    // confirm with FFT
+    const fftPeak = peakFromFFT(freqBuf, sampleRate, analyser.fftSize);
+    if (fftPeak.freq && Math.abs(fftPeak.freq - ac) / ac < 0.08) {
+      return {freq: (ac + fftPeak.freq)/2, method: 'AC+FFT'};
+    }
+    return {freq: ac, method: 'AC'};
+  }
+
+  // last resort: FFT only
+  const fftOnly = peakFromFFT(freqBuf, sampleRate, analyser.fftSize);
+  if (fftOnly.freq > 0) return {freq: fftOnly.freq, method: 'FFT'};
+
+  return null;
+}
+
+/* ======================
    Drawing gauge
-   --------------------- */
-function drawGauge(cents, tolerance, conf){
+   ====================== */
+function drawGauge(cents, tolerance, conf) {
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0,0,W,H);
 
-  // arc parameters
   const cx = W/2, cy = H*1.15, r = Math.min(W*0.45, H*1.6);
 
-  // base arc
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = "rgba(255,255,255,0.06)";
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, Math.PI*1.05, Math.PI*-0.05, false);
-  ctx.stroke();
+  // arc
+  ctx.lineWidth = 2; ctx.strokeStyle = "rgba(255,255,255,0.06)";
+  ctx.beginPath(); ctx.arc(cx,cy,r,Math.PI*1.05,Math.PI*-0.05,false); ctx.stroke();
 
   // ticks
   ctx.strokeStyle = "rgba(255,255,255,0.06)";
-  for(let c=-50;c<=50;c+=5){
-    const ang = map(c, -50, 50, Math.PI*1.05, Math.PI*-0.05);
+  for (let c=-50;c<=50;c+=5){
+    const ang = map(c,-50,50,Math.PI*1.05,Math.PI*-0.05);
     const x1 = cx + Math.cos(ang)*(r*0.92);
     const y1 = cy + Math.sin(ang)*(r*0.92);
     const x2 = cx + Math.cos(ang)*(r*0.98);
@@ -304,139 +347,146 @@ function drawGauge(cents, tolerance, conf){
     ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
   }
 
-  // small sweet spot ± (tolerance limited to small)
-  const small = Math.min(6, Math.max(1, parseInt(tolerance))); // make it small-ish
-  const leftAng = map(-small, -50, 50, Math.PI*1.05, Math.PI*-0.05);
-  const rightAng = map(small, -50, 50, Math.PI*1.05, Math.PI*-0.05);
-
-  ctx.beginPath();
-  ctx.fillStyle = "rgba(0,208,132,0.22)";
-  ctx.moveTo(cx,cy);
-  ctx.arc(cx,cy,r*0.86, rightAng, leftAng, true);
-  ctx.closePath();
-  ctx.fill();
+  // sweet spot small
+  const small = Math.min(6, Math.max(1, parseInt(tolRange.value)));
+  const leftAng = map(-small,-50,50,Math.PI*1.05,Math.PI*-0.05);
+  const rightAng = map(small,-50,50,Math.PI*1.05,Math.PI*-0.05);
+  ctx.beginPath(); ctx.fillStyle="rgba(0,208,132,0.22)";
+  ctx.moveTo(cx,cy); ctx.arc(cx,cy,r*0.86,rightAng,leftAng,true); ctx.closePath(); ctx.fill();
 
   // needle
-  const ang = map(cents, -50, 50, Math.PI*1.05, Math.PI*-0.05);
+  const ang = map(cents,-50,50,Math.PI*1.05,Math.PI*-0.05);
   const nx = cx + Math.cos(ang)*(r*0.78);
   const ny = cy + Math.sin(ang)*(r*0.78);
+  ctx.beginPath(); ctx.strokeStyle="rgba(0,0,0,0.45)"; ctx.lineWidth=6; ctx.moveTo(cx,cy); ctx.lineTo(nx,ny); ctx.stroke();
+  ctx.beginPath(); ctx.strokeStyle=(Math.abs(cents)<=tolerance?"rgba(0,208,132,0.98)":"rgba(255,107,107,0.98)"); ctx.lineWidth=3; ctx.moveTo(cx,cy); ctx.lineTo(nx,ny); ctx.stroke();
+  ctx.beginPath(); ctx.fillStyle="#cbd6dc"; ctx.arc(cx,cy,6,0,Math.PI*2); ctx.fill();
 
-  // shadow
-  ctx.beginPath(); ctx.strokeStyle = "rgba(0,0,0,0.45)"; ctx.lineWidth = 6; ctx.moveTo(cx,cy); ctx.lineTo(nx,ny); ctx.stroke();
-  // needle
-  ctx.beginPath(); ctx.strokeStyle = (Math.abs(cents) <= tolerance ? "rgba(0,208,132,0.98)" : "rgba(255,107,107,0.98)"); ctx.lineWidth = 3; ctx.moveTo(cx,cy); ctx.lineTo(nx,ny); ctx.stroke();
-
-  // center cap
-  ctx.beginPath(); ctx.fillStyle = "#cbd6dc"; ctx.arc(cx,cy,6,0,Math.PI*2); ctx.fill();
-
-  // left/right labels
-  ctx.fillStyle = "rgba(230,238,246,0.9)"; ctx.font = "12px system-ui"; ctx.textAlign="left"; ctx.fillText("Grave", 10, 18); ctx.textAlign="right"; ctx.fillText("Agudo", W-10, 18);
+  // labels
+  ctx.fillStyle="rgba(230,238,246,0.9)"; ctx.font="12px system-ui"; ctx.textAlign="left"; ctx.fillText("Grave",10,18); ctx.textAlign="right"; ctx.fillText("Agudo",W-10,18);
 
   // confidence bar
-  const barW = 160, barH = 10;
-  const bx = W - barW - 12, by = 12;
-  ctx.fillStyle = "rgba(255,255,255,0.06)"; ctx.fillRect(bx, by, barW, barH);
-  ctx.fillStyle = "rgba(0,208,132,0.9)"; ctx.fillRect(bx, by, barW * clamp(conf,0,1), barH);
-  ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.strokeRect(bx, by, barW, barH);
-  ctx.textAlign="center"; ctx.fillStyle="#bfead1"; ctx.font="11px system-ui"; ctx.fillText("Confianza", bx+barW/2, by + barH + 11);
+  const barW = 160, barH = 10; const bx = W - barW - 12, by = 12;
+  ctx.fillStyle="rgba(255,255,255,0.06)"; ctx.fillRect(bx,by,barW,barH);
+  ctx.fillStyle="rgba(0,208,132,0.9)"; ctx.fillRect(bx,by,barW*clamp(conf,0,1),barH);
+  ctx.strokeStyle="rgba(255,255,255,0.08)"; ctx.strokeRect(bx,by,barW,barH);
+  ctx.textAlign="center"; ctx.fillStyle="#bfead1"; ctx.font="11px system-ui"; ctx.fillText("Confianza",bx+barW/2,by+barH+11);
 }
 
-/* ---------------------
-   Main update loop: read analyser, detect pitch, smooth, update UI
-   --------------------- */
-function processFrame(){
+/* ======================
+   Main loop: read analyser and detect
+   ====================== */
+function processAudioFrame(){
   if (!analyser) return;
 
-  // read time domain and freq domain
-  analyser.getFloatTimeDomainData(timeDomain);
-  analyser.getFloatFrequencyData(freqDomain); // dB values
+  analyser.getFloatTimeDomainData(timeBuf);
+  analyser.getFloatFrequencyData(freqBuf);
 
-  // detection
-  const detection = combinedPitchDetection(timeDomain, audioCtx.sampleRate, freqDomain);
-  let freq = detection.freq;
-  if (!isFinite(freq) || freq <= 0) {
-    statusEl.textContent = 'Estado: sin señal válida';
+  const detection = detectPitchCombined(timeBuf, freqBuf, audioCtx.sampleRate);
+  if (!detection) {
+    statusEl.textContent = "Estado: sin pitch detectado";
     drawGauge(0, parseInt(tolRange.value), 0);
-    requestAnimationFrame(processFrame);
+    requestAnimationFrame(processAudioFrame);
     return;
   }
 
-  // push into history and compute stable median
-  historyFreq.push(freq);
-  if (historyFreq.length > HISTORY_MAX) historyFreq.shift();
-  // median for stability
-  const sorted = [...historyFreq].sort((a,b)=>a-b);
+  // smoothing: exponential + median history
+  const rawFreq = detection.freq;
+  lastSmoothed = lastSmoothed ? (smoothingAlpha * lastSmoothed + (1 - smoothingAlpha) * rawFreq) : rawFreq;
+
+  // push history and compute median
+  history.push(lastSmoothed);
+  if (history.length > HISTORY_MAX) history.shift();
+  const sorted = [...history].sort((a,b)=>a-b);
   const median = sorted[Math.floor(sorted.length/2)];
 
-  // confidence: use magnitude + closeness between methods + history variance
-  let mag = detection.mag || 0;
-  // map mag (linear) to 0..1 roughly (tuned empirically)
-  let magScore = clamp((mag*8), 0, 1); // mag typically small
-  // method bonus: if combined used both, boost confidence
-  let methodBonus = (detection.method==='both')?0.15:0.0;
-  // history variance penalty
-  const mean = historyFreq.reduce((a,b)=>a+b,0)/historyFreq.length;
-  const variance = historyFreq.reduce((s,v)=>s+(v-mean)*(v-mean),0)/historyFreq.length;
-  const stabScore = clamp(1 - Math.sqrt(variance)/20, 0, 1); // more variance -> lower
-  let conf = clamp(0.25*magScore + 0.6*stabScore + methodBonus, 0, 1);
+  // compute confidence:
+  // frequency stability (std of history), and FFT magnitude confirmation
+  const mean = history.reduce((a,b)=>a+b,0)/history.length;
+  const variance = history.reduce((s,v)=>s+(v-mean)*(v-mean),0)/history.length;
+  const stabScore = clamp(1 - Math.sqrt(variance)/15, 0, 1);
 
-  // choose displayed frequency from median (more stable)
+  // magnitude confirmation from FFT peak near median
+  const fftPeak = peakFromFFT(freqBuf, audioCtx.sampleRate, analyser.fftSize);
+  let magScore = clamp(fftPeak.mag * 1.5, 0, 1);
+
+  let methodBonus = (detection.method === 'YIN') ? 0.15 : 0;
+  const conf = clamp(0.5*stabScore + 0.35*magScore + methodBonus, 0, 1);
+
+  // choose median as display freq
   const displayFreq = median;
-
-  // map to note + cents
   const noteObj = freqToNote(displayFreq);
   const noteName = noteObj.name;
   const exactFreq = noteObj.exactFreq;
   const cents = toCents(displayFreq, exactFreq);
 
-  // string detection (closest string by log-distance)
+  // string detection
   const stringName = closestString(displayFreq);
 
-  // update UI
-  noteNameEl.textContent = noteName;
-  const base = noteName.replace(/[0-9]/g, '').replace('#','♯');
-  noteLatinEl.textContent = (NOTAS_LATINAS[base.replace('♯','#')] || base) + '  —  ' + (detection.method||'');
-  centsEl.textContent = `${cents>=0?'+':''}${cents.toFixed(1)} c`;
-  targetFreqEl.textContent = `${exactFreq.toFixed(2)} Hz`;
-  stringDetectedEl.textContent = stringName;
-  confidenceEl.textContent = `${Math.round(conf*100)}%`;
-  statusEl.textContent = `Método: ${detection.method} · RMS umbral ${parseFloat(sensRange.value).toFixed(3)}`;
+  // stability confirmation (require a few frames of stable readings)
+  if (history.length >= Math.min(4, HISTORY_MAX)) {
+    // measure small delta between latest and median
+    const latest = history[history.length - 1];
+    if (Math.abs(latest - median) < 2.5) stabilityCount++;
+    else stabilityCount = 0;
+  }
 
-  // draw gauge
+  // if sufficiently stable or high confidence, update UI
+  const showNow = (stabilityCount >= 3) || (conf > 0.8);
+
+  if (showNow) {
+    noteNameEl.textContent = noteName;
+    const base = noteName.replace(/[0-9]/g,'').replace('#','♯');
+    noteLatinEl.textContent = (NOTAS_LATINAS[base.replace('♯','#')] || base) + '  —  ' + detection.method;
+    centsEl.textContent = `${cents>=0?'+':''}${cents.toFixed(1)} c`;
+    targetFreqEl.textContent = `${exactFreq.toFixed(2)} Hz`;
+    stringDetectedEl.textContent = stringName;
+    confidenceEl.textContent = `${Math.round(conf*100)}%`;
+    statusEl.textContent = `Método: ${detection.method} · RMS umbral ${parseFloat(sensRange.value).toFixed(3)}`;
+  } else {
+    statusEl.textContent = `Buscando... método ${detection.method} · conf ${Math.round(conf*100)}%`;
+  }
+
   drawGauge(clamp(cents,-50,50), parseInt(tolRange.value), conf);
-
-  // keep lastDetected
-  lastDetected = { freq:displayFreq, note:noteName, cents, string:stringName, conf };
-
-  requestAnimationFrame(processFrame);
+  requestAnimationFrame(processAudioFrame);
 }
 
-/* ---------------------
-   Start / stop microphone
-   --------------------- */
+/* ======================
+   Start / Stop mic
+   ====================== */
 startBtn.addEventListener('click', async ()=>{
   try {
+    // stop previous if any
+    if (mediaStream){
+      mediaStream.getTracks().forEach(t=>t.stop());
+      mediaStream = null;
+    }
+    if (audioCtx){
+      try { await audioCtx.close(); } catch(_) {}
+      audioCtx = null;
+    }
+
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
     mediaStream = stream;
     const src = audioCtx.createMediaStreamSource(stream);
 
     analyser = audioCtx.createAnalyser();
-    analyser.fftSize = fftSize;
-    timeDomain = new Float32Array(analyser.fftSize);
-    freqDomain = new Float32Array(analyser.frequencyBinCount);
+    analyser.fftSize = FFT_SIZE; // 4096
+    timeBuf = new Float32Array(analyser.fftSize);
+    freqBuf = new Float32Array(analyser.frequencyBinCount);
 
-    // connect
     src.connect(analyser);
+
+    // reset
+    history = [];
+    lastSmoothed = 0;
+    stabilityCount = 0;
 
     startBtn.disabled = true;
     stopBtn.disabled = false;
 
-    // reset history
-    historyFreq = [];
-
-    // start loop
-    requestAnimationFrame(processFrame);
+    requestAnimationFrame(processAudioFrame);
     statusEl.textContent = 'Estado: escuchando...';
   } catch (e) {
     console.error(e);
@@ -444,24 +494,25 @@ startBtn.addEventListener('click', async ()=>{
   }
 });
 
-stopBtn.addEventListener('click', ()=>{
+stopBtn.addEventListener('click', async ()=>{
   if (mediaStream){
     mediaStream.getTracks().forEach(t=>t.stop());
     mediaStream = null;
   }
   if (audioCtx){
-    audioCtx.close();
+    try { await audioCtx.close(); } catch(_) {}
     audioCtx = null;
   }
   analyser = null;
   startBtn.disabled = false;
   stopBtn.disabled = true;
   statusEl.textContent = 'Estado: detenido';
+  drawGauge(0, parseInt(tolRange.value), 0);
 });
 
-/* ---------------------
+/* ======================
    Inicial draw
-   --------------------- */
+   ====================== */
 drawGauge(0, parseInt(tolRange.value), 0);
 </script>
 </body>
